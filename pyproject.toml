@@ -1,0 +1,13 @@
+[project]
+name = "claude-code-session-statistics"
+version = "0.1.0"
+description = "盤點 Claude Code 的所有 session：狀態、LLM 摘要、token 用量統計"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+ccs = "ccstat.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"

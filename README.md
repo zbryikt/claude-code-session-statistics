@@ -1,0 +1,84 @@
+# claude-code-session-statistics
+
+盤點本機所有 Claude Code session：目前狀態、LLM 摘要、token 用量統計。
+
+開太多 session 又不敢關，因為關掉就忘了在做什麼 —— 這個工具把「我有哪些坑」
+變成隨時可查，讓 session 不必兼任待辦清單。
+
+```
+$ ccs -s
+  # STATUS   IDLE   PROJECT                              SUMMARY
+  1 ● busy   now    ~/ai/topics/cpu                      開發 Claude session 管理工具…
+                                                          ↳ 修復摘要中的 prompt injection…
+  2 · closed 12h    ~/ai/2026/0901-tinypng               為 PNG 量化實作 adaptive dithering…
+                                                          ↳ 已 push 完成，接著處理…
+```
+
+## 安裝
+
+```bash
+pip install -e .          # 提供 ccs 指令
+# 或不安裝，直接跑：
+PYTHONPATH=. python3 -m ccstat
+```
+
+## 用法
+
+```bash
+ccs                  # 列出 session（執行中的排前面），自動增量掃描
+ccs -s               # 顯示 LLM 摘要而非最後一句 prompt
+ccs -l               # 只看還開著的
+ccs grantdash        # 用路徑或內容過濾
+ccs -a               # 不限筆數
+
+ccs sum              # 產生缺少或過期的摘要（預設前 30 筆）
+ccs sum -a           # 全部補齊
+ccs stats            # token 用量：每日 / 各專案 / 各模型
+ccs sync             # 只做增量掃描
+ccs resume 3         # 印出該筆的 cd + claude --resume 指令
+```
+
+## 資料來源
+
+| 來源 | 性質 | 用途 |
+|---|---|---|
+| `~/.claude/projects/**/*.jsonl` | append-only，永久保留 | 主體：所有 session 的歷史，含已關閉的 |
+| `~/.claude/sessions/<pid>.json` | 只反映當下，進程結束即消失 | 疊上「還開著嗎」 |
+
+存到 `~/.local/state/ccstat/ccstat.db`（SQLite）。刻意不放 `~/.claude` 底下 ——
+那是 Claude Code 自己的地盤，清掉或重裝都可能連帶消失。
+
+## 設計筆記
+
+**增量掃描用 byte offset，不用檔案 hash。** transcript 是 append-only 的
+jsonl，所以記住上次讀到第幾個位元組，下次 seek 過去讀新增的部分就好。對
+400MB 的資料來說，每次重算 hash 只是為了確認「沒變」，成本比直接讀新增內容
+還高。唯一要防的是檔案被改寫（長度變短）——那時 offset 失效，整檔重讀。
+
+首次全量約 3 秒，之後每次 0.3 秒。
+
+**摘要的快取鍵才是 hash，而且只 hash 餵給模型的那段文字。** 摘要只取決於送
+進模型的內容；那段文字本來就要讀，算它的 hash 不花額外 I/O。內容沒變就不重
+新呼叫模型。
+
+**摘要走 `claude -p` 而非 API。** 機器上已經有登入好的 `claude`，不需要另外
+的 API key，吃的是既有訂閱額度。預設 `claude-haiku-4-5`、4 並行，約 7 秒一筆。
+
+**transcript 是資料，不是指令。** 對話內容裡可能出現任何文字，包括看起來像系
+統提示的句子。實測過：不隔離的話，模型會把 transcript 裡的「禁止使用任何工具」
+當成給自己的指令然後開始自我辯解。所以一律包在 `<transcript>` 標籤內並在
+system prompt 明確聲明標籤內是待摘要的資料。
+
+**衍生狀態 vs 意圖狀態。** 這個工具只處理前者 —— 在哪個目錄、閒置多久、最後
+做了什麼，全都能自動算出來。後者（為什麼做這件事、下一步、卡在哪）沒有工具能
+推導，那該寫在各專案 repo 裡的筆記，跟著程式碼走。
+
+## 結構
+
+```
+ccstat/
+  db.py          SQLite schema（files / sessions / usage / summaries）
+  scan.py        增量掃描 transcript
+  summarize.py   claude -p 摘要，含 prompt injection 防護
+  cli.py         指令列介面
+```
