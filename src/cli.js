@@ -7,10 +7,54 @@ import { connect } from './db.js';
 import * as scan from './scan.js';
 import * as summarize from './summarize.js';
 import * as backupMod from './backup.js';
+import { pathLabel } from './pathlabel.js';
 import { ago, human, pad, trunc, width } from './util.js';
 
 const SESSIONS_DIR = join(homedir(), '.claude/sessions');
 const COMMANDS = ['ls', 'sum', 'sync', 'stats', 'resume', 'backup', 'help'];
+
+/**
+ * 可開關的欄位。# 與 STATUS 永遠顯示（沒有它們這張表就沒意義）。
+ * key 是給 -c / -s 用的編號。
+ */
+const COLUMNS = {
+  1: { name: 'elapsed', head: 'IDLE',        sort: (r) => r.last_at ?? 0 },
+  2: { name: 'path',    head: 'PATH',        sort: (r) => r.cwd ?? '' },
+  3: { name: 'label',   head: 'PROJ',        sort: (r) => r.label ?? '' },
+  4: { name: 'prompt',  head: 'LAST PROMPT', sort: (r) => r.last_prompt ?? '' },
+  5: { name: 'doing',   head: 'SUMMARY',     sort: (r) => r.doing ?? '' },
+};
+const DEFAULT_COLS = [1, 3, 4];
+
+/** 從 argv 抽出 -c1234 與 -s3+ 這種黏在一起的短旗標，其餘交給 parseArgs。 */
+function extractDisplayFlags(argv) {
+  let cols = null, sort = null;
+  const rest = [];
+  const valid = Object.keys(COLUMNS).join('');
+  for (const a of argv) {
+    let m = a.match(/^-c(.*)$/);
+    if (m) {
+      if (!/^[1-5]+$/.test(m[1])) {
+        throw new Error(`-c 後面只能接 ${valid} 的組合，收到：${a}\n` +
+          `  1=閒置時間 2=完整路徑 3=路徑摘要 4=最後 prompt 5=內容摘要`);
+      }
+      cols = [...new Set(m[1].split('').map(Number))];
+      continue;
+    }
+    m = a.match(/^-s(.*)$/);
+    if (m) {
+      const mm = m[1].match(/^([1-5])([+-]?)$/);
+      if (!mm) {
+        throw new Error(`-s 後面只能接 ${valid} 加上選用的 + / -，收到：${a}\n` +
+          `  例：-s1（時間，新到舊）、-s3+（路徑摘要，A→Z）`);
+      }
+      sort = { field: Number(mm[1]), asc: mm[2] === '+' };
+      continue;
+    }
+    rest.push(a);
+  }
+  return { cols, sort, rest };
+}
 
 /**
  * { sessionId: {pid, status} }，只含進程還活著的。
@@ -31,20 +75,33 @@ function liveSessions() {
   return out;
 }
 
-function fetchRows(db, { pattern, live, limit } = {}) {
+function fetchRows(db, { pattern, live, limit, sort } = {}) {
   let rows = db.prepare(`
     SELECT s.*, m.doing, m.next_step
     FROM sessions s LEFT JOIN summaries m ON m.sid = s.sid
     ORDER BY s.last_at DESC`).all();
 
   const alive = liveSessions();
-  rows = rows.map((r) => ({ ...r, live: alive.get(r.sid) ?? null }));
-  rows.sort((a, b) => (a.live ? 0 : 1) - (b.live ? 0 : 1) || (b.last_at ?? 0) - (a.last_at ?? 0));
+  rows = rows.map((r) => ({ ...r, live: alive.get(r.sid) ?? null, label: pathLabel(r.cwd) }));
+
+  if (sort) {
+    // 明確指定排序時就純粹照該欄排，不再把執行中的挑到前面
+    const key = COLUMNS[sort.field].sort;
+    const dir = sort.asc ? 1 : -1;
+    rows.sort((a, b) => {
+      const x = key(a), y = key(b);
+      const c = typeof x === 'number' ? x - y : String(x).localeCompare(String(y), 'zh-Hant');
+      return c * dir;
+    });
+  } else {
+    // 預設：執行中的排前面，其餘依最後活動時間新到舊
+    rows.sort((a, b) => (a.live ? 0 : 1) - (b.live ? 0 : 1) || (b.last_at ?? 0) - (a.last_at ?? 0));
+  }
 
   if (live) rows = rows.filter((r) => r.live);
   if (pattern) {
     const p = pattern.toLowerCase();
-    rows = rows.filter((r) => [r.cwd, r.last_prompt, r.doing]
+    rows = rows.filter((r) => [r.cwd, r.label, r.last_prompt, r.doing]
       .some((v) => (v ?? '').toLowerCase().includes(p)));
   }
   return limit ? rows.slice(0, limit) : rows;
@@ -60,35 +117,84 @@ function cmdSync(db, opts) {
               `${((Date.now() - t0) / 1000).toFixed(1)}s（資料庫共 ${n} 個 session）`);
 }
 
+/**
+ * 依終端機寬度分配欄位。固定寬度的欄位先扣掉，剩下的由文字欄位（last prompt
+ * 與 summary）平分——只有一個時就獨佔。
+ */
+function layout(cols, rows, total) {
+  const w = { };
+  let fixed = 3 + 1 + 8 + 1;                       // # 與 STATUS
+  if (cols.includes(1)) { w.elapsed = 6; fixed += 7; }
+  if (cols.includes(3)) {
+    w.label = Math.min(32, Math.max(4, ...rows.map((r) => width(r.label))));
+    fixed += w.label + 1;
+  }
+  if (cols.includes(2)) {
+    w.path = Math.min(38, Math.max(4, ...rows.map((r) => width(shortPath(r.cwd)))));
+    fixed += w.path + 1;
+  }
+  const flex = [4, 5].filter((c) => cols.includes(c));
+  const room = Math.max(20, total - fixed);
+  if (flex.length) {
+    const each = Math.floor((room - (flex.length - 1)) / flex.length);
+    if (cols.includes(4)) w.prompt = each;
+    if (cols.includes(5)) w.doing = each;
+  }
+  const tableWidth = fixed + flex.reduce(
+    (n, c) => n + (c === 4 ? w.prompt : w.doing) + 1, 0) - 1;
+  return { w, tableWidth: Math.min(total, tableWidth) };
+}
+
+function shortPath(cwd) {
+  return (cwd ?? '?').replace(homedir(), '~');
+}
+
 function cmdLs(db, opts) {
-  const rows = fetchRows(db, { pattern: opts.pattern, live: opts.live,
-                               limit: opts.all ? null : opts.n });
-  const home = homedir();
-  console.log(`${'#'.padStart(3)} ${pad('STATUS', 8)} ${pad('IDLE', 6)} ` +
-              `${pad('PROJECT', 36)} ${opts.summary ? 'SUMMARY' : 'LAST PROMPT'}`);
-  console.log('-'.repeat(118));
+  const rows = fetchRows(db, {
+    pattern: opts.pattern, live: opts.live, sort: opts.sort,
+    limit: opts.all ? null : opts.n,
+  });
+  const cols = opts.cols;
+  const total = process.stdout.columns && process.stdout.columns > 60
+    ? process.stdout.columns - 1 : 118;
+  const { w, tableWidth } = layout(cols, rows, total);
+
+  const head = [`${'#'.padStart(3)}`, pad('STATUS', 8)];
+  if (cols.includes(1)) head.push(pad(COLUMNS[1].head, w.elapsed));
+  if (cols.includes(3)) head.push(pad(COLUMNS[3].head, w.label));
+  if (cols.includes(2)) head.push(pad(COLUMNS[2].head, w.path));
+  if (cols.includes(4)) head.push(pad(COLUMNS[4].head, w.prompt));
+  if (cols.includes(5)) head.push(COLUMNS[5].head);
+  const line = head.join(' ').trimEnd();
+  console.log(line);
+  console.log('-'.repeat(tableWidth));
 
   rows.forEach((r, i) => {
-    const st = r.live ? `● ${r.live.status}` : '· closed';
-    let proj = (r.cwd ?? '?').replace(home, '~');
-    if (width(proj) > 36) proj = '…' + proj.slice(-35);
-    const head = `${String(i + 1).padStart(3)} ${pad(st, 8)} ${pad(ago(r.last_at), 6)} ${pad(proj, 36)} `;
-    if (opts.summary) {
-      if (!r.doing) return console.log(head + '(尚未摘要，跑 ccs sum)');
-      console.log(head + trunc(r.doing, 46));
-      if (r.next_step) console.log(' '.repeat(58) + '↳ ' + trunc(r.next_step, 44));
-    } else {
-      console.log(head + trunc(r.last_prompt, 46));
+    const cells = [String(i + 1).padStart(3),
+                   pad(r.live ? `● ${r.live.status}` : '· closed', 8)];
+    if (cols.includes(1)) cells.push(pad(ago(r.last_at), w.elapsed));
+    if (cols.includes(3)) cells.push(pad(trunc(r.label, w.label), w.label));
+    if (cols.includes(2)) cells.push(pad(trunc(shortPath(r.cwd), w.path), w.path));
+    if (cols.includes(4)) cells.push(pad(trunc(r.last_prompt, w.prompt), w.prompt));
+    if (cols.includes(5)) {
+      cells.push(r.doing ? trunc(r.doing, w.doing) : '(尚未摘要，跑 ccs sum)');
+    }
+    console.log(cells.join(' ').trimEnd());
+
+    // 摘要的「下一步」接在同一筆下面，縮排對齊摘要欄
+    if (cols.includes(5) && r.next_step) {
+      const indent = cells.slice(0, -1).reduce((n, c) => n + width(c) + 1, 0);
+      console.log(' '.repeat(indent) + '↳ ' + trunc(r.next_step, w.doing - 2));
     }
   });
 
-  const total = db.prepare('SELECT COUNT(*) c FROM sessions').get().c;
-  console.log('-'.repeat(118));
-  console.log(`共 ${total} 個 session（${rows.filter((r) => r.live).length} 執行中），顯示 ${rows.length} 筆`);
+  const totalN = db.prepare('SELECT COUNT(*) c FROM sessions').get().c;
+  console.log('-'.repeat(tableWidth));
+  console.log(`共 ${totalN} 個 session（${rows.filter((r) => r.live).length} 執行中），顯示 ${rows.length} 筆`);
 }
 
 async function cmdSum(db, opts) {
-  const rows = fetchRows(db, { pattern: opts.pattern, live: opts.live,
+  const rows = fetchRows(db, { pattern: opts.pattern, live: opts.live, sort: opts.sort,
                                limit: opts.all ? null : opts.n });
   const todo = summarize.pending(db, rows.map((r) => ({ sid: r.sid, path: r.path })));
   if (!todo.length) return console.log('摘要都是最新的，沒有要產生的');
@@ -144,7 +250,7 @@ function cmdStats(db) {
 }
 
 function cmdResume(db, opts) {
-  const rows = fetchRows(db, { pattern: opts.pattern });
+  const rows = fetchRows(db, { pattern: opts.pattern, sort: opts.sort });
   const r = rows[Number(opts.index) - 1];
   if (!r) { console.error('找不到對應的 session'); process.exit(1); }
   console.log(`cd ${r.cwd} && claude --resume ${r.sid}`);
@@ -164,9 +270,17 @@ const HELP = `ccs — Claude Code session 總覽
 
 用法：
   ccs [pattern]            列出 session（執行中的排前面），自動增量掃描
-  ccs -s                   顯示 LLM 摘要而非最後一句 prompt
   ccs -l                   只看還開著的
   ccs -a                   不限筆數（預設 30）
+
+欄位（-c 後面接編號，列到的才顯示；# 與 STATUS 固定顯示）：
+  1 = 閒置時間   2 = 完整路徑   3 = 路徑摘要   4 = 最後 prompt   5 = 內容摘要
+  預設 -c134。例：ccs -c1345、ccs -c35、ccs -c1234
+
+排序（-s 後面接欄位編號，+ 正序 - 逆序，預設逆序）：
+  ccs -s1      依時間，新到舊（等同 -s1-）
+  ccs -s3+     依路徑摘要，A→Z
+  不給 -s 時：執行中的排前面，其餘依時間新到舊
 
   ccs sum [pattern]        產生缺少或過期的摘要
   ccs stats                token 用量：每日 / 各專案 / 各模型
@@ -185,8 +299,16 @@ const HELP = `ccs — Claude Code session 總覽
 `;
 
 async function main() {
-  const argv = process.argv.slice(2);
+  let argv = process.argv.slice(2);
   const cmd = COMMANDS.includes(argv[0]) ? argv.shift() : 'ls';
+  let disp;
+  try {
+    disp = extractDisplayFlags(argv);
+  } catch (e) {
+    console.error(e.message);
+    process.exit(1);
+  }
+  argv = disp.rest;
   if (cmd === 'help' || argv.includes('-h') || argv.includes('--help')) {
     return console.log(HELP);
   }
@@ -200,7 +322,6 @@ async function main() {
         n: { type: 'string', default: '30' },
         all: { type: 'boolean', short: 'a', default: false },
         live: { type: 'boolean', short: 'l', default: false },
-        summary: { type: 'boolean', short: 's', default: false },
         model: { type: 'string', default: summarize.MODEL },
         workers: { type: 'string', default: String(summarize.WORKERS) },
         db: { type: 'string' },
@@ -223,7 +344,8 @@ async function main() {
   const opts = {
     pattern: cmd === 'resume' ? pos[1] : pos[0],
     index: pos[0], dest: pos[0],
-    n: Number(v.n), all: v.all, live: v.live, summary: v.summary,
+    n: Number(v.n), all: v.all, live: v.live,
+    cols: disp.cols ?? DEFAULT_COLS, sort: disp.sort,
     model: v.model, workers: Number(v.workers), verbose: v.verbose,
     dryRun: v['dry-run'], dbOnly: v['db-only'], show: v.show,
   };

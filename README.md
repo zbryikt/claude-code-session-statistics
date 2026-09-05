@@ -31,9 +31,8 @@ npm link          # 提供 ccs 指令
 
 ```bash
 ccs                  # 列出 session（執行中的排前面），自動增量掃描
-ccs -s               # 顯示 LLM 摘要而非最後一句 prompt
 ccs -l               # 只看還開著的
-ccs grantdash        # 用路徑或內容過濾
+ccs grantdash        # 用路徑、路徑摘要或內容過濾
 ccs -a               # 不限筆數
 
 ccs sum              # 產生缺少或過期的摘要（預設前 30 筆）
@@ -42,6 +41,59 @@ ccs stats            # token 用量：每日 / 各專案 / 各模型
 ccs sync             # 只做增量掃描
 ccs resume 3         # 印出該筆的 cd + claude --resume 指令
 ```
+
+### 欄位
+
+`-c` 後面接編號，列到的才顯示。`#` 與 `STATUS` 固定顯示，欄寬依終端機寬度自動分配。
+
+| 編號 | 欄位 | 說明 |
+|---|---|---|
+| 1 | `IDLE` | 距離最後活動多久 |
+| 2 | `PATH` | 完整路徑 |
+| 3 | `PROJ` | 路徑摘要（見下） |
+| 4 | `LAST PROMPT` | 最後一句輸入 |
+| 5 | `SUMMARY` | LLM 摘要（在做什麼 / 下一步） |
+
+```bash
+ccs              # 預設 -c134
+ccs -c35         # 只要路徑摘要與內容摘要
+ccs -c1345       # 加上完整路徑以外的全部
+ccs -c24         # 完整路徑 + 最後 prompt
+```
+
+### 排序
+
+`-s` 後面接欄位編號，`+` 正序、`-` 逆序（預設逆序）。
+
+```bash
+ccs -s1          # 依時間，新到舊
+ccs -s1+         # 依時間，舊到新
+ccs -s3+         # 依路徑摘要，A→Z
+```
+
+不給 `-s` 時是預設排序：**執行中的排前面**，其餘依時間新到舊。給了 `-s` 就純粹
+照該欄排，不再把執行中的挑到前面。
+
+### 路徑摘要
+
+從實際路徑歸納出的規則，把 cwd 壓成簡明標籤：
+
+```
+~/workspace/plotdb/projects/esh            ->  plotdb:esh
+~/workspace/grantdash/boards/itma-2026     ->  grantdash:itma-2026
+~/workspace/makeform/blocks/richtext       ->  makeform:richtext
+~/workspace/grantdash/v2/backend           ->  grantdash:v2/backend
+~/ai/2026/0901-tinypng                     ->  ai:0901 tinypng
+~/ai/topics/cpu                            ->  ai:cpu
+```
+
+`projects` / `boards` / `blocks` / `case` 這些第三層是組織用的分類詞，不帶識別
+資訊，顯示時略過。更深的層級保留首尾兩段而非只留首段 —— 只留首段會撞名，
+例如 `case/taicca/movie` 與 `case/taicca/2026/activity-crawler` 會變成同一個標籤。
+
+**刻意用規則而非 LLM。** 70 個實際路徑裡規則涵蓋 66 個，剩下的退回「最後兩段」
+也堪用。規則零成本、零延遲，而且同一路徑永遠得到同一標籤 —— 這是一個要用眼睛
+掃的欄位，措辭浮動比不夠聰明更礙事。
 
 ## 備份
 
@@ -113,6 +165,7 @@ API key，吃的是既有訂閱額度。預設 `claude-haiku-4-5`、4 並行，�
 bin/ccs           進入點（順手過濾掉 node:sqlite 的 experimental 警告）
 src/db.js         SQLite schema（files / sessions / usage / summaries / config）
 src/scan.js       增量掃描 transcript
+src/pathlabel.js  路徑 -> 簡明標籤的規則
 src/summarize.js  claude -p 摘要，含 prompt injection 防護
 src/backup.js     gcloud storage rsync 到 GCS
 src/cli.js        指令列介面
