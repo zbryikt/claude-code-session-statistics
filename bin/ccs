@@ -1,0 +1,10 @@
+#!/usr/bin/env node
+// node:sqlite 目前標為 experimental, 每次執行都會噴警告. 功能穩定, 只把
+// 這一則過濾掉, 其他警告照常顯示.
+const emit = process.emit;
+process.emit = function (name, data, ...rest) {
+  if (name === 'warning' && data && data.name === 'ExperimentalWarning'
+      && /SQLite/i.test(data.message)) return false;
+  return emit.call(this, name, data, ...rest);
+};
+await import('../src/cli.js');

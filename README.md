@@ -1,6 +1,6 @@
 # claude-code-session-statistics
 
-盤點本機所有 Claude Code session：目前狀態、LLM 摘要、token 用量統計。
+盤點本機所有 Claude Code session：目前狀態、LLM 摘要、token 用量統計、備份。
 
 開太多 session 又不敢關，因為關掉就忘了在做什麼 —— 這個工具把「我有哪些坑」
 變成隨時可查，讓 session 不必兼任待辦清單。
@@ -8,18 +8,23 @@
 ```
 $ ccs -s
   # STATUS   IDLE   PROJECT                              SUMMARY
-  1 ● busy   now    ~/ai/topics/cpu                      開發 Claude session 管理工具…
-                                                          ↳ 修復摘要中的 prompt injection…
+  1 ● busy   now    ~/ai/topics/cpu                      將 session 統計工具從 Python 改寫成 Node…
+                                                          ↳ 完成所有指令測試，確認 GCS 備份可用
   2 · closed 12h    ~/ai/2026/0901-tinypng               為 PNG 量化實作 adaptive dithering…
-                                                          ↳ 已 push 完成，接著處理…
+                                                          ↳ 已 push 完成，接著處理編碼問題
 ```
+
+## 需求
+
+Node.js >= 22（用內建的 `node:sqlite`，**沒有任何外部相依套件**）。
+摘要功能需要已登入的 `claude` CLI；備份功能需要 `gcloud`。
 
 ## 安裝
 
 ```bash
-pip install -e .          # 提供 ccs 指令
-# 或不安裝，直接跑：
-PYTHONPATH=. python3 -m ccstat
+npm link          # 提供 ccs 指令
+# 或直接跑：
+./bin/ccs
 ```
 
 ## 用法
@@ -38,6 +43,35 @@ ccs sync             # 只做增量掃描
 ccs resume 3         # 印出該筆的 cd + claude --resume 指令
 ```
 
+## 備份
+
+`~/.claude/projects` 是所有對話的唯一副本，預設沒有任何備份機制。
+
+```bash
+ccs backup gs://your-bucket/claude/   # 首次：指定目的地，之後會記住
+ccs backup                            # 用記住的目的地再備份一次
+ccs backup --dry-run                  # 只看會傳什麼
+ccs backup --show                     # 顯示目前的目的地
+ccs backup --db-only                  # 只備份資料庫
+```
+
+傳兩份東西：`projects/`（transcript 本體，無可取代）與 `ccstat.db`（摘要與統計，
+理論上可重算，但摘要是花 LLM 額度換來的）。
+
+用 `gcloud storage rsync` —— 注意 `gh` 是 GitHub 的 CLI，碰不到 `gs://`。
+**認證與權限請自行處理**，沒登入時 gcloud 的錯誤會直接透出來：
+
+```bash
+gcloud auth login
+gcloud config set project <你的專案>
+```
+
+排程備份可以交給 launchd 或 cron：
+
+```
+0 3 * * *  /path/to/ccs backup >/dev/null 2>&1
+```
+
 ## 資料來源
 
 | 來源 | 性質 | 用途 |
@@ -50,35 +84,41 @@ ccs resume 3         # 印出該筆的 cd + claude --resume 指令
 
 ## 設計筆記
 
-**增量掃描用 byte offset，不用檔案 hash。** transcript 是 append-only 的
-jsonl，所以記住上次讀到第幾個位元組，下次 seek 過去讀新增的部分就好。對
-400MB 的資料來說，每次重算 hash 只是為了確認「沒變」，成本比直接讀新增內容
-還高。唯一要防的是檔案被改寫（長度變短）——那時 offset 失效，整檔重讀。
+**增量掃描用 byte offset，不用檔案 hash。** transcript 是 append-only 的 jsonl，
+所以記住上次讀到第幾個位元組，下次 seek 過去讀新增的部分就好。對 400MB 的資料
+來說，每次重算 hash 只是為了確認「沒變」，成本比直接讀新增內容還高。唯一要防的
+是檔案被改寫（長度變短）—— 那時 offset 失效，整檔重讀。
 
-首次全量約 3 秒，之後每次 0.3 秒。
+實測：首次全量 115 檔 / 123,003 行 / 1.9 秒，之後每次 0.06 秒。
 
-**摘要的快取鍵才是 hash，而且只 hash 餵給模型的那段文字。** 摘要只取決於送
-進模型的內容；那段文字本來就要讀，算它的 hash 不花額外 I/O。內容沒變就不重
-新呼叫模型。
+**摘要的快取鍵才是 hash，而且只 hash 餵給模型的那段文字。** 摘要只取決於送進
+模型的內容；那段文字本來就要讀，算它的 hash 不花額外 I/O。內容沒變就不重新
+呼叫模型。
 
-**摘要走 `claude -p` 而非 API。** 機器上已經有登入好的 `claude`，不需要另外
-的 API key，吃的是既有訂閱額度。預設 `claude-haiku-4-5`、4 並行，約 7 秒一筆。
+**摘要走 `claude -p` 而非 API。** 機器上已經有登入好的 `claude`，不需要另外的
+API key，吃的是既有訂閱額度。預設 `claude-haiku-4-5`、4 並行，約 7 秒一筆。
 
-**transcript 是資料，不是指令。** 對話內容裡可能出現任何文字，包括看起來像系
-統提示的句子。實測過：不隔離的話，模型會把 transcript 裡的「禁止使用任何工具」
-當成給自己的指令然後開始自我辯解。所以一律包在 `<transcript>` 標籤內並在
-system prompt 明確聲明標籤內是待摘要的資料。
+**transcript 是資料，不是指令。** 對話內容裡可能出現任何文字，包括看起來像系統
+提示的句子。實測過：不隔離的話，模型會把 transcript 裡的「禁止使用任何工具」當
+成給自己的指令，然後開始自我辯解而不做摘要。所以一律包在 `<transcript>` 標籤內，
+並在 system prompt 明確聲明標籤內是待摘要的資料。
 
-**衍生狀態 vs 意圖狀態。** 這個工具只處理前者 —— 在哪個目錄、閒置多久、最後
-做了什麼，全都能自動算出來。後者（為什麼做這件事、下一步、卡在哪）沒有工具能
-推導，那該寫在各專案 repo 裡的筆記，跟著程式碼走。
+**衍生狀態 vs 意圖狀態。** 這個工具只處理前者 —— 在哪個目錄、閒置多久、最後做了
+什麼，全都能自動算出來。後者（為什麼做這件事、下一步、卡在哪）沒有工具能推導，
+那該寫在各專案 repo 裡的筆記，跟著程式碼走。
 
 ## 結構
 
 ```
-ccstat/
-  db.py          SQLite schema（files / sessions / usage / summaries）
-  scan.py        增量掃描 transcript
-  summarize.py   claude -p 摘要，含 prompt injection 防護
-  cli.py         指令列介面
+bin/ccs           進入點（順手過濾掉 node:sqlite 的 experimental 警告）
+src/db.js         SQLite schema（files / sessions / usage / summaries / config）
+src/scan.js       增量掃描 transcript
+src/summarize.js  claude -p 摘要，含 prompt injection 防護
+src/backup.js     gcloud storage rsync 到 GCS
+src/cli.js        指令列介面
+src/util.js       顯示寬度、格式化、並行池
 ```
+
+## 授權
+
+MIT
