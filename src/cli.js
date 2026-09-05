@@ -75,10 +75,12 @@ function liveSessions() {
   return out;
 }
 
-function fetchRows(db, { pattern, live, limit, sort } = {}) {
+function fetchRows(db, { pattern, live, limit, sort, sdk = false } = {}) {
+  // 預設不列 claude -p 自己留下的 session（kind='sdk'）
   let rows = db.prepare(`
     SELECT s.*, m.doing, m.next_step
     FROM sessions s LEFT JOIN summaries m ON m.sid = s.sid
+    ${sdk ? '' : "WHERE COALESCE(s.kind,'interactive') <> 'sdk'"}
     ORDER BY s.last_at DESC`).all();
 
   const alive = liveSessions();
@@ -111,10 +113,13 @@ function fetchRows(db, { pattern, live, limit, sort } = {}) {
 
 function cmdSync(db, opts) {
   const t0 = Date.now();
-  const { files, lines } = scan.sync(db, { verbose: opts.verbose });
-  const n = db.prepare('SELECT COUNT(*) c FROM sessions').get().c;
+  const { files, lines } = scan.sync(db, { verbose: opts.verbose, rescan: opts.rescan });
+  const n = db.prepare(
+    "SELECT COUNT(*) c FROM sessions WHERE COALESCE(kind,'interactive') <> 'sdk'").get().c;
+  const sdk = db.prepare("SELECT COUNT(*) c FROM sessions WHERE kind='sdk'").get().c;
   console.log(`掃描完成：${files} 個檔案有新增，共 ${lines} 行，` +
-              `${((Date.now() - t0) / 1000).toFixed(1)}s（資料庫共 ${n} 個 session）`);
+              `${((Date.now() - t0) / 1000).toFixed(1)}s` +
+              `（${n} 個 session${sdk ? `，另有 ${sdk} 個 claude -p 產生的已排除` : ''}）`);
 }
 
 /**
@@ -151,7 +156,7 @@ function shortPath(cwd) {
 
 function cmdLs(db, opts) {
   const rows = fetchRows(db, {
-    pattern: opts.pattern, live: opts.live, sort: opts.sort,
+    pattern: opts.pattern, live: opts.live, sort: opts.sort, sdk: opts.sdk,
     limit: opts.all ? null : opts.n,
   });
   const cols = opts.cols;
@@ -188,14 +193,16 @@ function cmdLs(db, opts) {
     }
   });
 
-  const totalN = db.prepare('SELECT COUNT(*) c FROM sessions').get().c;
+  const totalN = db.prepare(
+    `SELECT COUNT(*) c FROM sessions${opts.sdk ? '' : " WHERE COALESCE(kind,'interactive') <> 'sdk'"}`
+  ).get().c;
   console.log('-'.repeat(tableWidth));
   console.log(`共 ${totalN} 個 session（${rows.filter((r) => r.live).length} 執行中），顯示 ${rows.length} 筆`);
 }
 
 async function cmdSum(db, opts) {
   const rows = fetchRows(db, { pattern: opts.pattern, live: opts.live, sort: opts.sort,
-                               limit: opts.all ? null : opts.n });
+                               sdk: opts.sdk, limit: opts.all ? null : opts.n });
   const todo = summarize.pending(db, rows.map((r) => ({ sid: r.sid, path: r.path })));
   if (!todo.length) return console.log('摘要都是最新的，沒有要產生的');
 
@@ -213,13 +220,18 @@ function table(title, header, rows, fmt) {
   for (const r of rows) console.log(fmt(r));
 }
 
-function cmdStats(db) {
+function cmdStats(db, opts) {
+  // 與列表一致：預設把 claude -p 自己的用量排除，否則它會混進專案與模型統計
+  const only = opts.sdk ? '' :
+    "AND u.sid IN (SELECT sid FROM sessions WHERE COALESCE(kind,'interactive') <> 'sdk')";
+  const onlyBare = opts.sdk ? '' :
+    "AND sid IN (SELECT sid FROM sessions WHERE COALESCE(kind,'interactive') <> 'sdk')";
   table('每日用量（最近 14 天）',
     `${pad('日期', 12)}${'session'.padStart(8)}${'訊息'.padStart(9)}` +
     `${'輸入'.padStart(11)}${'輸出'.padStart(11)}${'快取讀'.padStart(11)}`,
     db.prepare(`SELECT day, COUNT(DISTINCT sid) s, COUNT(*) n,
                   SUM(input) i, SUM(output) o, SUM(cache_read) cr
-                FROM usage WHERE day IS NOT NULL
+                FROM usage WHERE day IS NOT NULL ${onlyBare}
                 GROUP BY day ORDER BY day DESC LIMIT 14`).all(),
     (r) => `${pad(r.day, 12)}${String(r.s).padStart(8)}${String(r.n).padStart(9)}` +
            `${human(r.i).padStart(11)}${human(r.o).padStart(11)}${human(r.cr).padStart(11)}`);
@@ -230,6 +242,7 @@ function cmdStats(db) {
     db.prepare(`SELECT s.project p, COUNT(DISTINCT s.sid) c, COUNT(u.uuid) n,
                   SUM(u.output) o, SUM(u.cache_read) cr
                 FROM sessions s JOIN usage u ON u.sid = s.sid
+                WHERE 1=1 ${only}
                 GROUP BY s.project ORDER BY o DESC LIMIT 15`).all(),
     (r) => `${pad(trunc(r.p, 32), 34)}${String(r.c).padStart(8)}${String(r.n).padStart(9)}` +
            `${human(r.o).padStart(11)}${human(r.cr).padStart(11)}`);
@@ -238,19 +251,20 @@ function cmdStats(db) {
     `${pad('模型', 28)}${'訊息'.padStart(9)}${'輸入'.padStart(11)}` +
     `${'輸出'.padStart(11)}${'快取讀'.padStart(11)}`,
     db.prepare(`SELECT model, COUNT(*) n, SUM(input) i, SUM(output) o, SUM(cache_read) cr
-                FROM usage WHERE model IS NOT NULL
+                FROM usage WHERE model IS NOT NULL ${onlyBare}
                 GROUP BY model ORDER BY o DESC`).all(),
     (r) => `${pad(trunc(r.model, 26), 28)}${String(r.n).padStart(9)}${human(r.i).padStart(11)}` +
            `${human(r.o).padStart(11)}${human(r.cr).padStart(11)}`);
 
   const t = db.prepare(`SELECT COUNT(*) n, SUM(input) i, SUM(output) o,
-                          SUM(cache_read) cr, SUM(cache_create) cc FROM usage`).get();
+                          SUM(cache_read) cr, SUM(cache_create) cc
+                        FROM usage WHERE 1=1 ${onlyBare}`).get();
   console.log(`\n總計：${t.n} 則助理訊息 / 輸入 ${human(t.i)} / 輸出 ${human(t.o)}` +
               ` / 快取讀 ${human(t.cr)} / 快取寫 ${human(t.cc)}`);
 }
 
 function cmdResume(db, opts) {
-  const rows = fetchRows(db, { pattern: opts.pattern, sort: opts.sort });
+  const rows = fetchRows(db, { pattern: opts.pattern, sort: opts.sort, sdk: opts.sdk });
   const r = rows[Number(opts.index) - 1];
   if (!r) { console.error('找不到對應的 session'); process.exit(1); }
   console.log(`cd ${r.cwd} && claude --resume ${r.sid}`);
@@ -285,6 +299,7 @@ const HELP = `ccs — Claude Code session 總覽
   ccs sum [pattern]        產生缺少或過期的摘要
   ccs stats                token 用量：每日 / 各專案 / 各模型
   ccs sync                 只做增量掃描
+  ccs sync --rescan        清掉快取重新全掃（改過分類規則後用）
   ccs resume <n>           印出該筆的 cd + claude --resume 指令
 
   ccs backup gs://bucket/path/   備份 transcript 與資料庫到 GCS（會記住目的地）
@@ -295,7 +310,7 @@ const HELP = `ccs — Claude Code session 總覽
 選項：
   -n <num>     顯示筆數      --model <id>   摘要用的模型
   --db <path>  資料庫路徑     --workers <n>  摘要並行數
-  --no-sync    跳過自動掃描
+  --no-sync    跳過自動掃描   --sdk          一併列出 claude -p 自己產生的 session
 `;
 
 async function main() {
@@ -329,6 +344,8 @@ async function main() {
         verbose: { type: 'boolean', short: 'v', default: false },
         'dry-run': { type: 'boolean', default: false },
         'db-only': { type: 'boolean', default: false },
+        sdk: { type: 'boolean', default: false },
+        rescan: { type: 'boolean', default: false },
         show: { type: 'boolean', default: false },
       },
     });
@@ -348,13 +365,14 @@ async function main() {
     cols: disp.cols ?? DEFAULT_COLS, sort: disp.sort,
     model: v.model, workers: Number(v.workers), verbose: v.verbose,
     dryRun: v['dry-run'], dbOnly: v['db-only'], show: v.show,
+    sdk: v.sdk, rescan: v.rescan,
   };
 
   try {
     if (cmd === 'ls') cmdLs(db, opts);
     else if (cmd === 'sum') await cmdSum(db, opts);
     else if (cmd === 'sync') cmdSync(db, opts);
-    else if (cmd === 'stats') cmdStats(db);
+    else if (cmd === 'stats') cmdStats(db, opts);
     else if (cmd === 'resume') cmdResume(db, opts);
     else if (cmd === 'backup') await cmdBackup(db, opts);
   } catch (e) {

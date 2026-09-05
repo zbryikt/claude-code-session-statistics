@@ -4,6 +4,10 @@
  * 走 CLI 而不是 API：機器上已經有登入好的 claude，不需要另外的 API key，
  * 也不會產生額外帳單——吃的是既有訂閱額度。
  *
+ * 不留痕跡：headless 執行預設也會寫下自己的 transcript，那會被下一次掃描當成
+ * 新 session、再被摘要一次，於是每跑一輪就多出一批。用 --no-session-persistence
+ * 從源頭關掉（scan.js 另有一層 sdk-cli 偵測當防呆）。
+ *
  * 安全性：transcript 的內容是「資料」不是「指令」。對話裡可能出現任何文字，
  * 包含看起來像系統提示的句子，所以一律包在 <transcript> 標籤內並明確聲明。
  * （實測過：不隔離的話，模型會把 transcript 裡的「禁止使用任何工具」當成
@@ -106,11 +110,15 @@ function parseOut(out) {
 
 export function runOne(dialogue, model = MODEL, timeoutMs = 120000) {
   return new Promise((resolve, reject) => {
+    // --disallowed-tools 吃可變長度參數，會把後面的東西一路當成工具名，
+    // 所以它必須排在其他旗標之前，prompt 一定要用 -- 隔開。
     const p = spawn('claude', [
-      '-p', '--model', model,
+      '-p',
+      '--no-session-persistence',
+      '--model', model,
       '--disallowed-tools', ...NO_TOOLS,
       '--append-system-prompt', SYSTEM,
-      PROMPT,
+      '--', PROMPT,
     ], { stdio: ['pipe', 'pipe', 'pipe'] });
 
     let out = '', err = '';

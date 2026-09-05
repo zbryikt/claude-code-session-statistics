@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   last_at     REAL,
   n_user      INTEGER DEFAULT 0,
   n_assistant INTEGER DEFAULT 0,
-  last_prompt TEXT
+  last_prompt TEXT,
+  kind        TEXT DEFAULT 'interactive'   -- interactive | sdk（claude -p 自己留下的）
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_last ON sessions(last_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_proj ON sessions(project);
@@ -77,7 +78,16 @@ export function connect(path = DB_PATH) {
   db.exec('PRAGMA journal_mode=WAL');      // 讀寫不互卡
   db.exec('PRAGMA synchronous=NORMAL');
   db.exec(SCHEMA);
+  migrate(db);
   return db;
+}
+
+/** 舊資料庫補上後來才加的欄位。 */
+function migrate(db) {
+  const cols = db.prepare('PRAGMA table_info(sessions)').all().map((c) => c.name);
+  if (!cols.includes('kind')) {
+    db.exec("ALTER TABLE sessions ADD COLUMN kind TEXT DEFAULT 'interactive'");
+  }
 }
 
 export function getConfig(db, key, fallback = null) {

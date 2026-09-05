@@ -16,8 +16,17 @@ $ ccs -s
 
 ## 需求
 
-Node.js >= 22（用內建的 `node:sqlite`，**沒有任何外部相依套件**）。
+**Node.js >= 22.13**（用內建的 `node:sqlite`，沒有任何外部相依套件）。
 摘要功能需要已登入的 `claude` CLI；備份功能需要 `gcloud`。
+
+`node:sqlite` 在 22.5 加入、22.13 才免旗標。`bin/ccs` 會自己處理版本差異：
+
+1. 直接試載，可以就走
+2. 不行就帶 `--experimental-sqlite` 重跑自己（涵蓋 22.5–22.12）
+3. 還是不行就去 volta / n 的安裝目錄找一個 >= 22.13 的 node 重跑
+
+第 3 步是為了 volta / nvm ——**它們依當前目錄決定 node 版本**，而 `ccs` 是從任何
+目錄執行的，在某個 pin 了舊版的專案底下會拿到不堪用的 node。
 
 ## 安裝
 
@@ -40,6 +49,7 @@ ccs sum -a           # 全部補齊
 ccs stats            # token 用量：每日 / 各專案 / 各模型
 ccs sync             # 只做增量掃描
 ccs resume 3         # 印出該筆的 cd + claude --resume 指令
+ccs sync --rescan    # 清掉快取重新全掃（改過分類規則後用）
 ```
 
 ### 欄位
@@ -154,6 +164,18 @@ API key，吃的是既有訂閱額度。預設 `claude-haiku-4-5`、4 並行，�
 提示的句子。實測過：不隔離的話，模型會把 transcript 裡的「禁止使用任何工具」當
 成給自己的指令，然後開始自我辯解而不做摘要。所以一律包在 `<transcript>` 標籤內，
 並在 system prompt 明確聲明標籤內是待摘要的資料。
+
+**摘要不能把自己算進去。** `claude -p` 預設也會寫下自己的 transcript，那會被下一
+次掃描當成新 session、再被摘要一次——每跑一輪就多出一批，而且污染 token 統計
+（多出 haiku 的列、專案欄變成 `/private/tmp`）。實測跑一次 `ccs sum -n 3`，
+session 數就從 115 變 118。
+
+兩層處理：摘要呼叫加 `--no-session-persistence` 從源頭不留檔；掃描時再認一次
+`entrypoint: "sdk-cli"` / `promptSource: "sdk"`，標成 `kind='sdk'` 排除在列表與
+統計之外（`--sdk` 可以看）。第二層是為了舊資料和別處跑的 headless 呼叫。
+
+順帶一提，`--disallowed-tools` 吃可變長度參數，會把後面的東西一路當成工具名，
+所以 prompt 一定要用 `--` 隔開。
 
 **衍生狀態 vs 意圖狀態。** 這個工具只處理前者 —— 在哪個目錄、閒置多久、最後做了
 什麼，全都能自動算出來。後者（為什麼做這件事、下一步、卡在哪）沒有工具能推導，

@@ -87,6 +87,10 @@ export function scanFile(db, path) {
 
   let cwd = null, branch = null, lastPrompt = null;
   let started = null, last = null, nUser = 0, nAsst = 0;
+  // claude -p（headless）自己也會留下 transcript。摘要功能已用
+  // --no-session-persistence 從源頭關掉，這裡再認一次當防呆：舊資料、
+  // 或別處跑的 headless 呼叫，都會被標成 sdk 而不混進列表與統計。
+  let kind = null;
   const usageRows = [];
 
   for (const line of lines) {
@@ -99,6 +103,8 @@ export function scanFile(db, path) {
       started = started === null ? ts : Math.min(started, ts);
       last = last === null ? ts : Math.max(last, ts);
     }
+
+    if (rec.entrypoint === 'sdk-cli' || rec.promptSource === 'sdk') kind = 'sdk';
 
     if (rec.type === 'user') {
       cwd = rec.cwd || cwd;
@@ -135,8 +141,8 @@ export function scanFile(db, path) {
 
   db.prepare(`
     INSERT INTO sessions (sid, path, cwd, project, branch, started_at, last_at,
-                          n_user, n_assistant, last_prompt)
-    VALUES (?,?,?,?,?,?,?,?,?,?)
+                          n_user, n_assistant, last_prompt, kind)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(sid) DO UPDATE SET
       path=excluded.path,
       cwd=COALESCE(excluded.cwd, sessions.cwd),
@@ -147,8 +153,10 @@ export function scanFile(db, path) {
       last_at=MAX(COALESCE(sessions.last_at, 0), COALESCE(excluded.last_at, 0)),
       n_user=sessions.n_user + excluded.n_user,
       n_assistant=sessions.n_assistant + excluded.n_assistant,
-      last_prompt=COALESCE(excluded.last_prompt, sessions.last_prompt)
-  `).run(sid, path, cwd, project, branch, started, last, nUser, nAsst, lastPrompt);
+      last_prompt=COALESCE(excluded.last_prompt, sessions.last_prompt),
+      kind=CASE WHEN excluded.kind='sdk' THEN 'sdk' ELSE sessions.kind END
+  `).run(sid, path, cwd, project, branch, started, last, nUser, nAsst, lastPrompt,
+         kind ?? 'interactive');
 
   if (usageRows.length) {
     const ins = db.prepare(`INSERT OR IGNORE INTO usage
@@ -167,9 +175,13 @@ export function scanFile(db, path) {
 }
 
 /** 掃過所有 transcript。回傳 { files, lines }。 */
-export function sync(db, { root = PROJECTS, verbose = false } = {}) {
+export function sync(db, { root = PROJECTS, verbose = false, rescan = false } = {}) {
   let files = 0, lines = 0;
   db.exec('BEGIN');
+  if (rescan) {
+    // 重新分類需要重讀，把 offset 與衍生資料清掉重來（全量約 2 秒）
+    db.exec('DELETE FROM files; DELETE FROM usage; DELETE FROM sessions');
+  }
   try {
     for (const path of listTranscripts(root)) {
       let got = 0;

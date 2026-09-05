@@ -1,10 +1,89 @@
 #!/usr/bin/env node
-// node:sqlite 目前標為 experimental, 每次執行都會噴警告. 功能穩定, 只把
-// 這一則過濾掉, 其他警告照常顯示.
+/**
+ * 進入點。負責讓程式在各種 Node 版本下都能跑起來，其餘邏輯都在 src/ 底下。
+ *
+ * node:sqlite 在 Node 22.5 加入、22.13 才 unflagged。而 volta / nvm 這類工具會
+ * 依當前目錄決定 node 版本——ccs 是從任何目錄執行的，所以不能假設拿到的版本夠新。
+ * 處理順序：
+ *   1. 直接試載，可以就走。
+ *   2. 不行就帶 --experimental-sqlite 重跑自己（涵蓋 22.5–22.12）。
+ *   3. 還是不行（22.5 以下）就去 volta / n 的安裝目錄找一個夠新的 node 重跑。
+ *   4. 都找不到才報錯，並說明怎麼裝。
+ */
+import { spawnSync } from 'node:child_process';
+import { existsSync, readdirSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 const emit = process.emit;
 process.emit = function (name, data, ...rest) {
   if (name === 'warning' && data && data.name === 'ExperimentalWarning'
       && /SQLite/i.test(data.message)) return false;
   return emit.call(this, name, data, ...rest);
 };
+
+const SELF = fileURLToPath(import.meta.url);
+const ARGS = process.argv.slice(2);
+const FLAG = '--experimental-sqlite';
+
+async function loadable() {
+  try { await import('node:sqlite'); return true; } catch { return false; }
+}
+
+function rerun(bin, execArgs) {
+  const r = spawnSync(bin, [...execArgs, SELF, ...ARGS], { stdio: 'inherit' });
+  process.exit(r.status ?? 1);
+}
+
+/** 版本字串轉成可比大小的數字，找不到就回 -1。 */
+function vnum(v) {
+  const m = String(v).match(/^v?(\d+)\.(\d+)\.(\d+)/);
+  return m ? Number(m[1]) * 1e6 + Number(m[2]) * 1e3 + Number(m[3]) : -1;
+}
+
+const MIN = vnum('22.13.0');     // 這版起 node:sqlite 免旗標
+const MIN_FLAGGED = vnum('22.5.0'); // 這版起有 node:sqlite，但要帶旗標
+
+/** 在 volta 與 n 的安裝目錄裡找一個 >= 22.13 的 node。 */
+function findNewerNode() {
+  const roots = [
+    join(homedir(), '.volta/tools/image/node'),
+    join(homedir(), 'bin/n/n/versions/node'),
+    join(homedir(), 'n/versions/node'),
+    '/usr/local/n/versions/node',
+  ];
+  const found = [];
+  for (const root of roots) {
+    let names = [];
+    try { names = readdirSync(root); } catch { continue; }
+    for (const name of names) {
+      if (vnum(name) < MIN) continue;
+      const bin = join(root, name, 'bin', 'node');
+      if (existsSync(bin)) found.push([vnum(name), bin]);
+    }
+  }
+  found.sort((a, b) => b[0] - a[0]);
+  return found.length ? found[0][1] : null;
+}
+
+if (!(await loadable())) {
+  // 只有真的支援該旗標的版本才重跑；更舊的 node 會直接以 bad option 中止
+  if (vnum(process.versions.node) >= MIN_FLAGGED && !process.execArgv.includes(FLAG)) {
+    rerun(process.execPath, [FLAG]);
+  }
+
+  const better = findNewerNode();
+  if (better) rerun(better, []);
+
+  console.error(
+    `ccs 需要內建的 node:sqlite，目前的 Node ${process.versions.node} 沒有。\n\n` +
+    'Node 22.13+ 或 23.4+ 直接可用；22.5–22.12 需要 --experimental-sqlite（本程式會自動加）。\n' +
+    '注意 volta / nvm 會依當前目錄決定版本，所以在某些專案底下可能拿到較舊的 node。\n\n' +
+    '解法：\n' +
+    '  volta install node@22        # 裝一個新的，本程式會自動找到並使用\n' +
+    '  n 22                         # 或用 n');
+  process.exit(1);
+}
+
 await import('../src/cli.js');
