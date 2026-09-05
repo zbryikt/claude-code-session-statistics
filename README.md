@@ -16,7 +16,9 @@ $ ccs -s
 
 ## 需求
 
-**Node.js >= 22.13**（用內建的 `node:sqlite`，沒有任何外部相依套件）。
+**Node.js >= 22.13**（用內建的 `node:sqlite`，執行期沒有任何相依套件）。
+`package.json` 裡的 `@plotdb/guides` 是 devDependency，只用來提供 `context/shared`
+的開發慣例文件，跑 `ccs` 用不到。
 摘要功能需要已登入的 `claude` CLI；備份功能需要 `gcloud`。
 
 `node:sqlite` 在 22.5 加入、22.13 才免旗標。`bin/ccs` 會自己處理版本差異：
@@ -30,7 +32,7 @@ $ ccs -s
 
 ## 安裝
 
-沒有相依套件，所以 `npm i` 幾乎什麼都不做（只產生 lock 檔）。要做的是把 `ccs`
+執行期沒有相依套件，所以 `npm i` 對使用者來說幾乎什麼都不做。要做的是把 `ccs`
 放上 PATH，有四種方式：
 
 | 方式 | 安裝成本 | 每次執行 | 更新 |
