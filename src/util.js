@@ -23,8 +23,18 @@ export function width(s) {
   return n;
 }
 
+/** 靠左補到指定顯示寬度。 */
 export function pad(s, n) {
   return String(s ?? '') + ' '.repeat(Math.max(0, n - width(s)));
+}
+
+/**
+ * 靠右補到指定顯示寬度。
+ * 不能用 String.padStart——它數的是 UTF-16 字元數，'訊息'.padStart(9) 會得到
+ * 9 個字元但佔 11 格，中文表頭就會歪掉。
+ */
+export function lpad(s, n) {
+  return ' '.repeat(Math.max(0, n - width(s))) + String(s ?? '');
 }
 
 export function trunc(s, n) {

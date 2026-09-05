@@ -8,7 +8,7 @@ import * as scan from './scan.js';
 import * as summarize from './summarize.js';
 import * as backupMod from './backup.js';
 import { pathLabel } from './pathlabel.js';
-import { ago, human, pad, trunc, width } from './util.js';
+import { ago, human, lpad, pad, trunc, width } from './util.js';
 
 const SESSIONS_DIR = join(homedir(), '.claude/sessions');
 const COMMANDS = ['ls', 'sum', 'sync', 'stats', 'resume', 'backup', 'help'];
@@ -84,7 +84,7 @@ function fetchRows(db, { pattern, live, limit, sort, sdk = false } = {}) {
     ORDER BY s.last_at DESC`).all();
 
   const alive = liveSessions();
-  rows = rows.map((r) => ({ ...r, live: alive.get(r.sid) ?? null, label: pathLabel(r.cwd) }));
+  rows = rows.map((r) => ({ ...r, live: alive.get(r.sid) ?? null, label: r.label ?? pathLabel(r.cwd) }));
 
   if (sort) {
     // 明確指定排序時就純粹照該欄排，不再把執行中的挑到前面
@@ -214,10 +214,17 @@ async function cmdSum(db, opts) {
   console.log(`完成 ${ok}/${todo.length}`);
 }
 
-function table(title, header, rows, fmt) {
+/**
+ * 用欄位規格畫表，避免每個表各自拼字串又各自算錯寬度。
+ * align 'r' 的欄位用 lpad 而不是 String.padStart——後者數字元不數顯示寬度。
+ */
+function renderTable(title, cols, rows) {
+  const cell = (c, v) => (c.align === 'r' ? lpad(trunc(v, c.w), c.w) : pad(trunc(v, c.w), c.w));
+  const head = cols.map((c) => cell(c, c.head)).join(' ');
   console.log(`\n=== ${title} ===`);
-  console.log(header);
-  for (const r of rows) console.log(fmt(r));
+  console.log(head);
+  console.log('-'.repeat(width(head)));
+  for (const r of rows) console.log(cols.map((c) => cell(c, c.get(r))).join(' ').trimEnd());
 }
 
 function cmdStats(db, opts) {
@@ -226,35 +233,42 @@ function cmdStats(db, opts) {
     "AND u.sid IN (SELECT sid FROM sessions WHERE COALESCE(kind,'interactive') <> 'sdk')";
   const onlyBare = opts.sdk ? '' :
     "AND sid IN (SELECT sid FROM sessions WHERE COALESCE(kind,'interactive') <> 'sdk')";
-  table('每日用量（最近 14 天）',
-    `${pad('日期', 12)}${'session'.padStart(8)}${'訊息'.padStart(9)}` +
-    `${'輸入'.padStart(11)}${'輸出'.padStart(11)}${'快取讀'.padStart(11)}`,
-    db.prepare(`SELECT day, COUNT(DISTINCT sid) s, COUNT(*) n,
-                  SUM(input) i, SUM(output) o, SUM(cache_read) cr
-                FROM usage WHERE day IS NOT NULL ${onlyBare}
-                GROUP BY day ORDER BY day DESC LIMIT 14`).all(),
-    (r) => `${pad(r.day, 12)}${String(r.s).padStart(8)}${String(r.n).padStart(9)}` +
-           `${human(r.i).padStart(11)}${human(r.o).padStart(11)}${human(r.cr).padStart(11)}`);
 
-  table('各專案（依輸出 token）',
-    `${pad('專案', 34)}${'session'.padStart(8)}${'訊息'.padStart(9)}` +
-    `${'輸出'.padStart(11)}${'快取讀'.padStart(11)}`,
-    db.prepare(`SELECT s.project p, COUNT(DISTINCT s.sid) c, COUNT(u.uuid) n,
-                  SUM(u.output) o, SUM(u.cache_read) cr
-                FROM sessions s JOIN usage u ON u.sid = s.sid
-                WHERE 1=1 ${only}
-                GROUP BY s.project ORDER BY o DESC LIMIT 15`).all(),
-    (r) => `${pad(trunc(r.p, 32), 34)}${String(r.c).padStart(8)}${String(r.n).padStart(9)}` +
-           `${human(r.o).padStart(11)}${human(r.cr).padStart(11)}`);
+  const num = (head, w, get) => ({ head, w, align: 'r', get });
 
-  table('各模型',
-    `${pad('模型', 28)}${'訊息'.padStart(9)}${'輸入'.padStart(11)}` +
-    `${'輸出'.padStart(11)}${'快取讀'.padStart(11)}`,
-    db.prepare(`SELECT model, COUNT(*) n, SUM(input) i, SUM(output) o, SUM(cache_read) cr
-                FROM usage WHERE model IS NOT NULL ${onlyBare}
-                GROUP BY model ORDER BY o DESC`).all(),
-    (r) => `${pad(trunc(r.model, 26), 28)}${String(r.n).padStart(9)}${human(r.i).padStart(11)}` +
-           `${human(r.o).padStart(11)}${human(r.cr).padStart(11)}`);
+  renderTable('每日用量（最近 14 天）', [
+    { head: '日期', w: 11, align: 'l', get: (r) => r.day },
+    num('session', 8, (r) => r.s),
+    num('訊息', 8, (r) => r.n),
+    num('輸入', 9, (r) => human(r.i)),
+    num('輸出', 9, (r) => human(r.o)),
+    num('快取讀', 10, (r) => human(r.cr)),
+  ], db.prepare(`SELECT day, COUNT(DISTINCT sid) s, COUNT(*) n,
+                   SUM(input) i, SUM(output) o, SUM(cache_read) cr
+                 FROM usage WHERE day IS NOT NULL ${onlyBare}
+                 GROUP BY day ORDER BY day DESC LIMIT 14`).all());
+
+  renderTable('各專案（依輸出 token）', [
+    { head: '專案', w: 30, align: 'l', get: (r) => r.p },
+    num('session', 8, (r) => r.c),
+    num('訊息', 8, (r) => r.n),
+    num('輸出', 9, (r) => human(r.o)),
+    num('快取讀', 10, (r) => human(r.cr)),
+  ], db.prepare(`SELECT COALESCE(s.label, s.project) p, COUNT(DISTINCT s.sid) c,
+                   COUNT(u.uuid) n, SUM(u.output) o, SUM(u.cache_read) cr
+                 FROM sessions s JOIN usage u ON u.sid = s.sid
+                 WHERE 1=1 ${only}
+                 GROUP BY p ORDER BY o DESC LIMIT 15`).all());
+
+  renderTable('各模型', [
+    { head: '模型', w: 26, align: 'l', get: (r) => r.model },
+    num('訊息', 8, (r) => r.n),
+    num('輸入', 9, (r) => human(r.i)),
+    num('輸出', 9, (r) => human(r.o)),
+    num('快取讀', 10, (r) => human(r.cr)),
+  ], db.prepare(`SELECT model, COUNT(*) n, SUM(input) i, SUM(output) o, SUM(cache_read) cr
+                 FROM usage WHERE model IS NOT NULL ${onlyBare}
+                 GROUP BY model ORDER BY o DESC`).all());
 
   const t = db.prepare(`SELECT COUNT(*) n, SUM(input) i, SUM(output) o,
                           SUM(cache_read) cr, SUM(cache_create) cc

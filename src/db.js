@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   sid         TEXT PRIMARY KEY,
   path        TEXT,
   cwd         TEXT,
-  project     TEXT,              -- cwd 的最後一段，給統計分組用
+  project     TEXT,              -- cwd 的最後一段（保留備用）
+  label       TEXT,              -- pathLabel(cwd)，統計與顯示都用這個分組
   branch      TEXT,
   started_at  REAL,
   last_at     REAL,
@@ -35,8 +36,6 @@ CREATE TABLE IF NOT EXISTS sessions (
   last_prompt TEXT,
   kind        TEXT DEFAULT 'interactive'   -- interactive | sdk（claude -p 自己留下的）
 );
-CREATE INDEX IF NOT EXISTS idx_sessions_last ON sessions(last_at DESC);
-CREATE INDEX IF NOT EXISTS idx_sessions_proj ON sessions(project);
 
 -- 逐則 assistant 訊息的 token 用量；uuid 當主鍵讓重掃是冪等的
 CREATE TABLE IF NOT EXISTS usage (
@@ -50,9 +49,6 @@ CREATE TABLE IF NOT EXISTS usage (
   cache_read   INTEGER DEFAULT 0,
   cache_create INTEGER DEFAULT 0
 );
-CREATE INDEX IF NOT EXISTS idx_usage_sid   ON usage(sid);
-CREATE INDEX IF NOT EXISTS idx_usage_day   ON usage(day);
-CREATE INDEX IF NOT EXISTS idx_usage_model ON usage(model);
 
 -- LLM 摘要。key = 餵給模型那段文字的 hash，變了才重算
 CREATE TABLE IF NOT EXISTS summaries (
@@ -72,6 +68,15 @@ CREATE TABLE IF NOT EXISTS config (
 );
 `;
 
+// 索引另外建：它們可能參照到後來才加的欄位，必須排在 migrate 之後
+const INDEXES = `
+CREATE INDEX IF NOT EXISTS idx_sessions_last ON sessions(last_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sessions_label ON sessions(label);
+CREATE INDEX IF NOT EXISTS idx_usage_sid   ON usage(sid);
+CREATE INDEX IF NOT EXISTS idx_usage_day   ON usage(day);
+CREATE INDEX IF NOT EXISTS idx_usage_model ON usage(model);
+`;
+
 export function connect(path = DB_PATH) {
   mkdirSync(dirname(path), { recursive: true });
   const db = new DatabaseSync(path);
@@ -79,6 +84,7 @@ export function connect(path = DB_PATH) {
   db.exec('PRAGMA synchronous=NORMAL');
   db.exec(SCHEMA);
   migrate(db);
+  db.exec(INDEXES);
   return db;
 }
 
@@ -87,6 +93,9 @@ function migrate(db) {
   const cols = db.prepare('PRAGMA table_info(sessions)').all().map((c) => c.name);
   if (!cols.includes('kind')) {
     db.exec("ALTER TABLE sessions ADD COLUMN kind TEXT DEFAULT 'interactive'");
+  }
+  if (!cols.includes('label')) {
+    db.exec('ALTER TABLE sessions ADD COLUMN label TEXT');
   }
 }
 

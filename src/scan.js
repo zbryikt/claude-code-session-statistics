@@ -11,6 +11,7 @@ import { readdirSync, statSync, openSync, readSync, closeSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join, sep } from 'node:path';
 import { localDay } from './util.js';
+import { pathLabel } from './pathlabel.js';
 
 export const PROJECTS = join(homedir(), '.claude/projects');
 
@@ -138,15 +139,18 @@ export function scanFile(db, path) {
     cwd = '/' + dir.replace(/^-/, '').replaceAll('-', '/');
   }
   const project = cwd.split('/').filter(Boolean).pop() ?? null;
+  // 路徑最後一段會撞名（server 可能是 makechart/server 或別的），統計一律用標籤
+  const label = pathLabel(cwd);
 
   db.prepare(`
-    INSERT INTO sessions (sid, path, cwd, project, branch, started_at, last_at,
+    INSERT INTO sessions (sid, path, cwd, project, label, branch, started_at, last_at,
                           n_user, n_assistant, last_prompt, kind)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(sid) DO UPDATE SET
       path=excluded.path,
       cwd=COALESCE(excluded.cwd, sessions.cwd),
       project=COALESCE(excluded.project, sessions.project),
+      label=COALESCE(excluded.label, sessions.label),
       branch=COALESCE(excluded.branch, sessions.branch),
       started_at=MIN(COALESCE(sessions.started_at, excluded.started_at),
                      COALESCE(excluded.started_at, sessions.started_at)),
@@ -155,7 +159,7 @@ export function scanFile(db, path) {
       n_assistant=sessions.n_assistant + excluded.n_assistant,
       last_prompt=COALESCE(excluded.last_prompt, sessions.last_prompt),
       kind=CASE WHEN excluded.kind='sdk' THEN 'sdk' ELSE sessions.kind END
-  `).run(sid, path, cwd, project, branch, started, last, nUser, nAsst, lastPrompt,
+  `).run(sid, path, cwd, project, label, branch, started, last, nUser, nAsst, lastPrompt,
          kind ?? 'interactive');
 
   if (usageRows.length) {
