@@ -30,11 +30,42 @@ $ ccs -s
 
 ## 安裝
 
+沒有相依套件，所以 `npm i` 幾乎什麼都不做（只產生 lock 檔）。要做的是把 `ccs`
+放上 PATH：
+
 ```bash
+git clone git@github.com:zbryikt/claude-code-session-statistics.git
+cd claude-code-session-statistics
 npm link          # 提供 ccs 指令
-# 或直接跑：
-./bin/ccs
+ccs               # 第一次執行會自動全掃，約 2 秒
 ```
+
+不想裝也可以直接跑 `./bin/ccs`，功能完全一樣。
+
+**用 volta 的話 `npm link` 特別值得做**：volta 會把 shim 綁定到安裝當下的 node
+版本，之後不管在哪個目錄執行都用那個版本。
+
+```
+$ volta list
+package claude-code-session-statistics@0.3.0 / ccs / node@22.23.1
+```
+
+這比 `bin/ccs` 裡的執行期版本 fallback 乾淨——volta 使用者靠 shim 就解決了，
+那層 fallback 是留給沒有版本管理工具的環境。
+
+移除：`npm unlink -g claude-code-session-statistics`
+
+### 新機器上還需要什麼
+
+| 功能 | 需要 | 沒有的話 |
+|---|---|---|
+| 列表 / 統計 | 只要 Node | — |
+| `ccs sum` 摘要 | 已登入的 `claude` CLI | 摘要欄顯示「尚未摘要」 |
+| `ccs backup` | `gcloud` 且已 auth | 報錯並提示要跑什麼 |
+
+資料庫是**衍生資料**，不必搬——新機器第一次跑 `ccs` 就會從該機器的
+`~/.claude/projects` 重建。唯一搬得有意義的是 `summaries` 表（花 LLM 額度換來的），
+那可以透過 `ccs backup` / 手動複製 `~/.local/state/ccstat/ccstat.db` 帶過去。
 
 ## 用法
 
