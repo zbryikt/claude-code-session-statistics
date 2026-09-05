@@ -31,16 +31,34 @@ $ ccs -s
 ## 安裝
 
 沒有相依套件，所以 `npm i` 幾乎什麼都不做（只產生 lock 檔）。要做的是把 `ccs`
-放上 PATH：
+放上 PATH，有四種方式：
+
+| 方式 | 安裝成本 | 每次執行 | 更新 |
+|---|---|---|---|
+| `npm link`（clone 後） | clone | **0.09s** | `git pull` 立即生效 |
+| `npm i -g github:zbryikt/claude-code-session-statistics` | 3.8s | 0.24s | 重跑安裝指令 |
+| `npx -y github:zbryikt/claude-code-session-statistics` | 無 | **2.0s** | 每次自動最新 |
+| `./bin/ccs`（clone 後直接跑） | clone | 0.09s | `git pull` 立即生效 |
+
+（數字是實測值，npx 的 2.0s 是有快取後的；首次約 4.9s。）
+
+**日常使用選 `npm i -g` 或 `npm link`。** npx 每次要花 2 秒重新解析套件，
+對一個一天會敲很多次的指令來說太慢，而且需要網路。它適合的是試用或一次性查詢：
+
+```bash
+# 別台機器上臨時看一下，不想留東西
+npx -y github:zbryikt/claude-code-session-statistics -c135
+```
+
+**開發機用 `npm link`**（symlink 到 repo，改了立刻生效）；
+**其他機器用 `npm i -g`**（安裝的是快照複本，git pull 不會影響它）。
 
 ```bash
 git clone git@github.com:zbryikt/claude-code-session-statistics.git
 cd claude-code-session-statistics
-npm link          # 提供 ccs 指令
+npm link
 ccs               # 第一次執行會自動全掃，約 2 秒
 ```
-
-不想裝也可以直接跑 `./bin/ccs`，功能完全一樣。
 
 **用 volta 的話 `npm link` 特別值得做**：volta 會把 shim 綁定到安裝當下的 node
 版本，之後不管在哪個目錄執行都用那個版本。
@@ -53,7 +71,8 @@ package claude-code-session-statistics@0.3.0 / ccs / node@22.23.1
 這比 `bin/ccs` 裡的執行期版本 fallback 乾淨——volta 使用者靠 shim 就解決了，
 那層 fallback 是留給沒有版本管理工具的環境。
 
-移除：`npm unlink -g claude-code-session-statistics`
+移除：`npm unlink -g claude-code-session-statistics`（`npm i -g` 裝的則是
+`npm uninstall -g claude-code-session-statistics`）
 
 ### 新機器上還需要什麼
 
