@@ -174,7 +174,11 @@ function cmdLs(db, opts) {
   console.log(line);
   console.log('-'.repeat(tableWidth));
 
-  rows.forEach((r, i) => {
+  // -r 只翻轉顯示順序：仍取同樣那幾筆，編號也不變，resume <n> 照樣對得上
+  const shown = rows.map((r, i) => [r, i]);
+  if (opts.reverse) shown.reverse();
+
+  shown.forEach(([r, i]) => {
     const cells = [String(i + 1).padStart(3),
                    pad(r.live ? `● ${r.live.status}` : '· closed', 8)];
     if (cols.includes(1)) cells.push(pad(ago(r.last_at), w.elapsed));
@@ -309,6 +313,7 @@ const HELP = `ccs — Claude Code session 總覽
   ccs -s1      依時間，新到舊（等同 -s1-）
   ccs -s3+     依路徑摘要，A→Z
   不給 -s 時：執行中的排前面，其餘依時間新到舊
+  ccs -r       顯示順序上下翻轉（最新的在最下面）；筆數與編號不變
 
   ccs sum [pattern]        產生缺少或過期的摘要
   ccs stats                token 用量：每日 / 各專案 / 各模型
@@ -351,6 +356,7 @@ async function main() {
         n: { type: 'string', default: '30' },
         all: { type: 'boolean', short: 'a', default: false },
         live: { type: 'boolean', short: 'l', default: false },
+        reverse: { type: 'boolean', short: 'r', default: false },
         model: { type: 'string', default: summarize.MODEL },
         workers: { type: 'string', default: String(summarize.WORKERS) },
         db: { type: 'string' },
@@ -375,7 +381,7 @@ async function main() {
   const opts = {
     pattern: cmd === 'resume' ? pos[1] : pos[0],
     index: pos[0], dest: pos[0],
-    n: Number(v.n), all: v.all, live: v.live,
+    n: Number(v.n), all: v.all, live: v.live, reverse: v.reverse,
     cols: disp.cols ?? DEFAULT_COLS, sort: disp.sort,
     model: v.model, workers: Number(v.workers), verbose: v.verbose,
     dryRun: v['dry-run'], dbOnly: v['db-only'], show: v.show,
